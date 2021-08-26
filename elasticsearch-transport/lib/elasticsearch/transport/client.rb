@@ -115,6 +115,7 @@ module Elasticsearch
       #
       # @option enable_meta_header [Boolean] :enable_meta_header Enable sending the meta data header to Cloud.
       #                                                          (Default: true)
+      # @option ca_fingerprint [String] :ca_fingerprint provide this value to only trust certificates that are signed by a specific CA certificate
       #
       # @yield [faraday] Access and configure the `Faraday::Connection` instance directly with a block
       #
@@ -153,13 +154,36 @@ module Elasticsearch
                          @arguments[:adapter] ||= __auto_detect_adapter
                          set_meta_header # from include MetaHeader
                          @transport_class.new(hosts: @hosts, options: @arguments) do |faraday|
-                           faraday.adapter(@arguments[:adapter])
+                           faraday.adapter(@arguments[:adapter]) do |adapter|
+                             if (@ca_fingerprint = @arguments.delete(:ca_fingerprint))
+                               setup_ca_fingerprint(adapter)
+                             end
+                           end
                            block&.call faraday
                          end
                        else
                          set_meta_header # from include MetaHeader
                          @transport_class.new(hosts: @hosts, options: @arguments)
                        end
+        end
+      end
+
+      def setup_ca_fingerprint(adapter)
+        verification_callback = lambda do | _, cert_store |
+          request_fingerprint = OpenSSL::Digest::SHA256.hexdigest(cert_store.current_cert.to_der).upcase
+          matching_certs = cert_store.chain.select do |cert|
+            OpenSSL::Digest::SHA256.hexdigest(cert.to_der).upcase == @ca_fingerprint
+          end
+
+          ! matching_certs.empty?
+        end
+
+        if [:net_http, :net_http_persistent].include? @arguments[:adapter]
+          adapter.verify_callback = verification_callback
+        elsif [:httpclient].include? @arguments[:adapter]
+          adapter.ssl_config.verify_callback = verification_callback
+        else
+          warn("CA Fingerprinting not supported in #{@arguments[:adapter]}")
         end
       end
       # Performs a request through delegation to {#transport}.
